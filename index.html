@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CANDU Operator Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Custom Styles */
+        body { font-family: 'Inter', sans-serif; overscroll-behavior: none; }
+        .fuel-channel, .interactive-svg-element, .interactive-text { transition: all 0.2s ease-in-out; cursor: pointer; }
+        .fuel-channel:hover { transform: scale(1.1); box-shadow: 0 0 15px rgba(52, 211, 153, 0.7); }
+        .interactive-svg-element:hover { filter: drop-shadow(0 0 8px #60a5fa); }
+        .interactive-text:hover { filter: drop-shadow(0 0 5px #f0f0f0); text-decoration: underline; }
+        .scram-button { box-shadow: 0 0 20px rgba(239, 68, 68, 0.6); transition: all 0.2s ease; }
+        .scram-button:active { transform: scale(0.95); box-shadow: 0 0 5px rgba(239, 68, 68, 0.9); }
+        .modal-backdrop { transition: opacity 0.3s ease-in-out; }
+        .modal-content { transition: transform 0.3s ease-in-out; }
+        .log-entry, .alarm-banner { animation: fadeIn 0.5s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .water-flow { stroke-dasharray: 10; animation: dash 2s linear infinite; }
+        .steam-flow { stroke-dasharray: 4; animation: dash-steam 1s linear infinite; }
+        @keyframes dash { to { stroke-dashoffset: -100; } }
+        @keyframes dash-steam { to { stroke-dashoffset: -100; } }
+        .flashing-alarm { animation: flash 1s infinite; }
+        @keyframes flash { 0%, 100% { background-color: #dc2626; } 50% { background-color: #f87171; } }
+        .challenge-btn-group { display: flex; }
+        .challenge-btn { flex-grow: 1; border-radius: 0; }
+        .challenge-btn-group .challenge-btn:first-child { border-top-left-radius: 0.5rem; border-bottom-left-radius: 0.5rem; }
+        .challenge-btn-group .challenge-info-btn:last-child { border-top-right-radius: 0.5rem; border-bottom-right-radius: 0.5rem; }
+        .challenge-btn:disabled { background-color: #4b5563; cursor: not-allowed; opacity: 0.7; }
+        #map { height: 250px; border-radius: 0.75rem; border: 1px solid #4a5568; }
+        .leaflet-container { background: #374151; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200">
+
+    <div id="alarm-banner" class="hidden sticky top-0 z-50 bg-red-600 text-white p-2 text-center shadow-lg">
+        <span id="alarm-text" class="font-bold">ALARM</span>
+        <button id="alarm-ack-btn" class="ml-4 bg-white/20 hover:bg-white/40 px-3 py-1 rounded-md text-sm">Acknowledge</button>
+    </div>
+
+    <div class="container mx-auto p-2 sm:p-4 min-h-screen">
+        <header class="flex flex-wrap justify-between items-center bg-gray-800/50 backdrop-blur-sm p-4 rounded-xl shadow-lg border border-gray-700 mb-4 sticky top-2 z-40">
+            <div>
+                <h1 class="text-xl md:text-2xl font-bold text-emerald-400">CANDU Operator Interface</h1>
+                <p class="text-xs md:text-sm text-gray-400">Unit 1 - Status: <span id="reactor-status-text" class="font-semibold text-green-400">NOMINAL</span></p>
+                <p class="text-xs md:text-sm text-gray-400">Output: <span id="mw-output" class="font-semibold text-cyan-400">1200</span> MW / 1200 MW</p>
+            </div>
+            <div class="text-right mt-2 sm:mt-0">
+                <div class="text-lg md:text-xl font-mono" id="current-time"></div>
+                <div class="text-xs text-gray-500" id="location-text">Valenzuela City, Metro Manila, Philippines</div>
+            </div>
+        </header>
+
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            
+            <div class="lg:col-span-2 space-y-4">
+                <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                    <div class="flex justify-between items-center mb-3">
+                        <h2 class="font-semibold text-lg">Reactor Core Monitor</h2>
+                        <button id="core-info-btn" class="text-xs bg-blue-600 hover:bg-blue-500 rounded-full px-3 py-1">Info</button>
+                    </div>
+                    <div id="reactor-core-grid" class="grid grid-cols-12 gap-1.5 p-2 bg-gray-900 rounded-lg"></div>
+                    <div class="flex flex-wrap justify-center gap-x-4 gap-y-2 text-xs mt-3 text-gray-400">
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-emerald-500 mr-2"></span>Nominal</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-orange-500 mr-2"></span>High Temp</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-red-500 mr-2"></span>Critical Temp</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-blue-500 animate-pulse mr-2"></span>Refuel</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-gray-600 mr-2"></span>Shutdown</div>
+                    </div>
+                </section>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                     <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                        <h2 class="font-semibold text-lg mb-3">Geographic Operations</h2>
+                        <div id="map"></div>
+                         <select id="location-selector" class="mt-2 w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm">
+                             <option value="default">Select Plant Location...</option>
+                         </select>
+                    </section>
+                    <section id="meltdown-consequences" class="hidden bg-red-900/50 border border-red-700 p-4 rounded-xl shadow-md">
+                        <h2 class="font-semibold text-lg mb-3 text-red-300">MELTDOWN IN PROGRESS</h2>
+                        <div class="text-center">
+                            <div class="text-5xl font-mono text-red-400" id="casualties-counter">0</div>
+                            <div class="text-sm text-red-300">Projected Casualties</div>
+                            <p class="text-xs text-gray-400 mt-2">Based on proximity, wind dispersion, and evacuation failure.</p>
+                        </div>
+                    </section>
+                    <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                        <h2 class="font-semibold text-lg mb-3">Primary Heat Transport</h2>
+                        <div class="bg-gray-900 p-2 rounded-lg"><svg viewBox="0 0 200 150">
+                            <path d="M 50 20 L 150 20 L 150 130 L 50 130 Z" stroke="#4a5568" stroke-width="4" fill="none" />
+                            <path id="water-flow-path" d="M 50 20 L 150 20 L 150 130 L 50 130 Z" stroke="#3b82f6" stroke-width="2" fill="none" class="water-flow" />
+                            <g id="svg-reactor" class="interactive-svg-element"><rect x="85" y="10" width="30" height="20" fill="#34d399" rx="2" /><text x="100" y="25" font-size="6" text-anchor="middle" fill="#fff">Core</text></g>
+                            <g id="svg-sg" class="interactive-svg-element"><rect x="155" y="40" width="30" height="70" fill="#60a5fa" rx="2" /><text x="170" y="75" font-size="6" text-anchor="middle" fill="#fff">Steam Gen</text></g>
+                            <g id="svg-pump" class="interactive-svg-element"><circle cx="35" cy="75" r="12" fill="#f59e0b" /><text x="35" y="77" font-size="6" text-anchor="middle" fill="#000">Pump</text></g>
+                            <text x="100" y="45" font-size="7" fill="#f0f0f0" text-anchor="middle" class="interactive-text" id="pht-temp-graph-btn">PHT Temp: <tspan id="pht-temp-text" class="font-bold fill-amber-400">310°C</tspan></text>
+                            <text x="100" y="120" font-size="7" fill="#f0f0f0" text-anchor="middle" class="interactive-text" id="pht-pressure-graph-btn">PHT Pressure: <tspan id="pht-pressure-text" class="font-bold fill-sky-400">10MPa</tspan></text>
+                        </svg></div>
+                    </section>
+                     <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                        <h2 class="font-semibold text-lg mb-3">Secondary Loop (Power Gen)</h2>
+                        <div class="bg-gray-900 p-2 rounded-lg"><svg viewBox="0 0 200 150">
+                            <path d="M 20 20 L 80 20 L 80 130 L 20 130 Z" stroke="#4a5568" stroke-width="4" fill="none" />
+                            <path d="M 20 20 L 80 20" stroke="#a7f3d0" stroke-width="2" fill="none" class="steam-flow" />
+                            <path d="M 80 130 L 20 130 Z" stroke="#93c5fd" stroke-width="2" fill="none" class="water-flow"/>
+                            <g id="svg-turbine" class="interactive-svg-element"><rect x="85" y="10" width="30" height="50" fill="#a78bfa" rx="2" /><text x="100" y="40" font-size="6" text-anchor="middle" fill="#fff">Turbine</text></g>
+                            <g id="svg-generator" class="interactive-svg-element"><rect x="120" y="10" width="40" height="50" fill="#facc15" rx="2" /><text x="140" y="40" font-size="6" text-anchor="middle" fill="#000">Generator</text></g>
+                            <g id="svg-condenser" class="interactive-svg-element"><rect x="20" y="80" width="60" height="20" fill="#06b6d4" rx="2" /><text x="50" y="93" font-size="6" text-anchor="middle" fill="#fff">Condenser</text></g>
+                            <text x="125" y="80" font-size="7" fill="#f0f0f0" text-anchor="middle">Turbine Speed: <tspan id="turbine-speed-text" class="font-bold fill-purple-400">1800rpm</tspan></text>
+                            <text x="125" y="100" font-size="7" fill="#f0f0f0" text-anchor="middle" class="interactive-text" id="mw-graph-btn">Grid Output: <tspan id="grid-output-text" class="font-bold fill-yellow-400">1200MW</tspan></text>
+                        </svg></div>
+                    </section>
+                </div>
+            </div>
+
+            <div class="space-y-4">
+                 <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                    <h2 class="font-semibold text-lg mb-3">System Controls</h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label for="power-slider" class="block mb-2 text-sm font-medium">Power Setpoint (<span id="power-value">100</span>%)</label>
+                            <input id="power-slider" type="range" min="0" max="100" value="100" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+                        </div>
+                        <div>
+                            <label class="block mb-2 text-sm font-medium text-red-400">Emergency Shutdown</label>
+                            <button id="scram-button" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded-lg scram-button">REACTOR SCRAM</button>
+                        </div>
+                        <div>
+                            <label class="block mb-2 text-sm font-medium text-yellow-400">Simulation Reset</label>
+                            <button id="reset-button" class="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg">RESET SIMULATION</button>
+                        </div>
+                    </div>
+                </section>
+                <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                    <h2 class="font-semibold text-lg mb-3">Challenge Scenarios</h2>
+                    <div id="challenge-buttons-container" class="space-y-2"></div>
+                </section>
+                <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                    <h2 class="font-semibold text-lg mb-3">Event Log</h2>
+                    <div id="log-container" class="h-48 bg-gray-900 rounded-lg p-2 space-y-2 overflow-y-auto text-xs font-mono"></div>
+                </section>
+                 <section class="bg-gray-800 p-4 rounded-xl shadow-md border border-gray-700">
+                    <h2 class="font-semibold text-lg mb-3">Operator Status</h2>
+                    <div class="flex justify-between items-center text-center bg-gray-900 p-2 rounded-lg">
+                        <div>
+                            <div class="text-2xl font-bold text-green-400" id="operator-score">100</div>
+                            <div class="text-xs text-gray-400">Performance Score</div>
+                        </div>
+                         <div>
+                             <textarea id="shift-log" class="bg-gray-700 text-xs w-full h-16 rounded p-1" placeholder="Begin shift handover notes..."></textarea>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <div id="modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 hidden modal-backdrop"><div id="modal-content" class="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg border border-gray-700 p-6 transform scale-95 modal-content">
+        <div class="flex justify-between items-start">
+            <h3 id="modal-title" class="text-xl font-bold mb-4 text-emerald-400">Modal Title</h3>
+            <button id="modal-close-btn" class="text-gray-400 hover:text-white">&times;</button>
+        </div>
+        <div id="modal-body" class="text-gray-300"></div><div id="modal-footer" class="mt-6 text-right"></div>
+    </div></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- DOM Elements ---
+            const dom = {
+                reactorCoreGrid: document.getElementById('reactor-core-grid'),
+                logContainer: document.getElementById('log-container'),
+                powerSlider: document.getElementById('power-slider'),
+                powerValueSpan: document.getElementById('power-value'),
+                reactorStatusText: document.getElementById('reactor-status-text'),
+                phtTempText: document.getElementById('pht-temp-text'),
+                phtPressureText: document.getElementById('pht-pressure-text'),
+                scramButton: document.getElementById('scram-button'),
+                currentTimeEl: document.getElementById('current-time'),
+                mwOutput: document.getElementById('mw-output'),
+                resetButton: document.getElementById('reset-button'),
+                alarmBanner: document.getElementById('alarm-banner'),
+                alarmText: document.getElementById('alarm-text'),
+                alarmAckBtn: document.getElementById('alarm-ack-btn'),
+                operatorScoreEl: document.getElementById('operator-score'),
+                turbineSpeedText: document.getElementById('turbine-speed-text'),
+                gridOutputText: document.getElementById('grid-output-text'),
+                modal: document.getElementById('modal'),
+                modalContent: document.getElementById('modal-content'),
+                modalTitle: document.getElementById('modal-title'),
+                modalBody: document.getElementById('modal-body'),
+                modalFooter: document.getElementById('modal-footer'),
+                modalCloseBtn: document.getElementById('modal-close-btn'),
+                coreInfoBtn: document.getElementById('core-info-btn'),
+                phtTempGraphBtn: document.getElementById('pht-temp-graph-btn'),
+                phtPressureGraphBtn: document.getElementById('pht-pressure-graph-btn'),
+                challengeButtonsContainer: document.getElementById('challenge-buttons-container'),
+                mapContainer: document.getElementById('map'),
+                locationSelector: document.getElementById('location-selector'),
+                locationText: document.getElementById('location-text'),
+                meltdownConsequences: document.getElementById('meltdown-consequences'),
+                casualtiesCounter: document.getElementById('casualties-counter'),
+            };
+
+            // --- State Variables ---
+            const NUM_CHANNELS = 96, TOTAL_CAPACITY_MW = 1200, HISTORY_LENGTH = 30;
+            let fuelChannels = [], reactorPower = 100, powerSetpoint = 100, phtTemp = 310, phtPressure = 10.0, operatorScore = 100, turbineSpeed = 1800;
+            let state = {}, meltdownElapsedTime = 0;
+            const stateVariables = [ 'isScrammed', 'isPumpTripped', 'isTurbineTripped', 'hasOffsitePower', 'isSmallLOCA', 'isLargeLOCA', 'isSGRupture', 'isInstrumentAirLost', 'isControlSystemFailed', 'isGridUnstable', 'isFire', 'isEarthquake', 'isTsunami', 'isBlackout' ];
+            let activeAlarm = null, simTime = new Date('2025-10-05T12:29:00-08:00'), trendChart = null, map = null;
+            let phtTempHistory = [], phtPressureHistory = [], mwHistory = [], timeHistory = [];
+
+            const locations = [
+                { name: "Labrador, Pangasinan", coords: [15.90, 120.14] },
+                { name: "Mariveles, Bataan", coords: [14.43, 120.49] },
+                { name: "Aroroy, Masbate", coords: [12.51, 123.40] },
+                { name: "Brgy. Inagawan, Palawan", coords: [9.67, 118.66] },
+                { name: "Brgy. Concepcion, Palawan", coords: [9.80, 118.73] },
+                { name: "San Rafael, Bulacan", coords: [14.96, 120.97] },
+                { name: "Batangas City, Batangas", coords: [13.75, 121.05] }
+            ];
+            
+            const challengeScenarios = [
+                { id: 'fault-pump-trip', name: 'PHT Pump Trip', color: 'indigo', description: 'A primary heat transport pump fails, reducing coolant flow. Operator must reduce power to prevent core overheating.'},
+                { id: 'fault-turbine-trip', name: 'Turbine Trip', color: 'indigo', description: 'The main turbine trips offline, causing a load rejection. Operator must rapidly reduce reactor power to prevent a SCRAM on high steam pressure.'},
+                { id: 'fault-power-loss', name: 'Grid Power Loss', color: 'indigo', description: 'Connection to the external electrical grid is lost. The plant must enter "island mode," using its own power for essential systems, requiring a major power reduction.'},
+                { id: 'fault-small-loca', name: 'Small LOCA', color: 'purple', description: 'A small leak develops in the primary coolant system (Loss of Coolant Accident). Operator must monitor pressure and activate emergency cooling if necessary.'},
+                { id: 'fault-large-loca', name: 'Large LOCA', color: 'purple', description: 'A major pipe break in the primary system. This is a severe accident requiring immediate SCRAM and activation of the Emergency Core Cooling System (ECCS).'},
+                { id: 'fault-sg-rupture', name: 'SG Tube Rupture', color: 'purple', description: 'A tube inside a Steam Generator ruptures, leaking radioactive primary water into the secondary steam loop. Requires plant shutdown.'},
+                { id: 'fault-instrument-air', name: 'Instrument Air Loss', color: 'teal', description: 'Loss of compressed air used to operate valves and controls. Many systems will fail-safe, potentially causing a turbine trip or other upsets.'},
+                { id: 'fault-control-sys', name: 'Control System Fail', color: 'teal', description: 'The digital control system malfunctions, potentially causing an uncontrolled power increase. Requires immediate manual intervention or SCRAM.'},
+                { id: 'fault-grid-unstable', name: 'Grid Instability', color: 'teal', description: 'The external power grid is fluctuating wildly. The plant must disconnect to protect its own equipment, leading to a turbine trip.'},
+                { id: 'fault-fire', name: 'Turbine Hall Fire', color: 'orange', description: 'A fire breaks out in the non-nuclear part of the plant. Requires dispatching fire crews and potentially shutting down the turbine.'},
+                { id: 'fault-earthquake', name: 'M6.0 Earthquake', color: 'red', description: 'A significant seismic event occurs. The reactor is designed to automatically SCRAM to ensure safety.'},
+                { id: 'fault-tsunami', name: 'Tsunami Warning', color: 'red', description: 'A tsunami is detected heading for the plant. This is a beyond-design-basis event that threatens the ultimate heat sink (sea water intake). Requires immediate SCRAM.'},
+                { id: 'fault-blackout', name: 'Station Blackout', color: 'red', description: 'A total loss of all AC power (Grid and emergency diesels). This is the most severe accident, leading to core meltdown without power restoration.'},
+            ];
+
+            function initialize() {
+                initializeChallenges();
+                initializeMap();
+                for (let i = 0; i < NUM_CHANNELS; i++) {
+                    const daysToRefuel = Math.floor(Math.random() * 300) + 1;
+                    const channel = { id: i, temp: 315 + (Math.random() - 0.5) * 10, power: 1.05 - Math.random() * 0.1, daysToRefuel: daysToRefuel, refuelNeeded: daysToRefuel <= 0 };
+                    fuelChannels.push(channel);
+                    const channelEl = document.createElement('div');
+                    channelEl.className = 'fuel-channel w-full h-4 rounded-full';
+                    channelEl.dataset.id = i;
+                    channelEl.addEventListener('click', () => showChannelInfo(i));
+                    dom.reactorCoreGrid.appendChild(channelEl);
+                }
+                updateClock();
+                setInterval(updateClock, 1000);
+                setInterval(simulationTick, 1000);
+                addLog('System online. Awaiting operator input.', 'info');
+                resetSimulation();
+            }
+
+            function initializeMap() {
+                map = L.map(dom.mapContainer).setView([12.8797, 121.7740], 6); // Centered on Philippines
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                    subdomains: 'abcd',
+                    maxZoom: 20
+                }).addTo(map);
+
+                locations.forEach((loc, index) => {
+                    L.marker(loc.coords).addTo(map).bindPopup(loc.name);
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = loc.name;
+                    dom.locationSelector.appendChild(option);
+                });
+            }
+
+            function initializeChallenges() {
+                challengeScenarios.forEach(scen => {
+                    const group = document.createElement('div');
+                    group.className = 'challenge-btn-group';
+
+                    const btn = document.createElement('button');
+                    btn.id = scen.id;
+                    btn.className = `challenge-btn bg-${scen.color}-600 hover:bg-${scen.color}-500 text-white font-bold py-2 px-3 text-xs`;
+                    btn.textContent = scen.name;
+                    
+                    const infoBtn = document.createElement('button');
+                    infoBtn.className = `challenge-info-btn bg-${scen.color}-700 hover:bg-${scen.color}-600 text-white font-bold p-2 text-xs`;
+                    infoBtn.innerHTML = '&#9432;'; // Info symbol
+                    infoBtn.dataset.scenarioId = scen.id;
+
+                    group.appendChild(btn);
+                    group.appendChild(infoBtn);
+                    dom.challengeButtonsContainer.appendChild(group);
+                });
+            }
+
+            function simulationTick() {
+                simTime.setSeconds(simTime.getSeconds() + 3600); 
+
+                if (state.isScrammed) reactorPower = Math.max(0, reactorPower - 5);
+                else {
+                    if (state.isControlSystemFailed) reactorPower = Math.min(150, reactorPower + 2);
+                    else if (reactorPower < powerSetpoint) reactorPower = Math.min(powerSetpoint, reactorPower + 0.5);
+                    else if (reactorPower > powerSetpoint) reactorPower = Math.max(powerSetpoint, reactorPower - 0.5);
+                }
+
+                const powerFactor = reactorPower / 100;
+                phtTemp = 280 + 30 * powerFactor + (Math.random() - 0.5) * 2;
+                phtPressure = 9.5 + 0.5 * powerFactor + (Math.random() - 0.5) * 0.1;
+
+                if (state.isPumpTripped) { phtPressure *= 0.8; phtTemp += 2; }
+                if (state.isSmallLOCA) phtPressure -= 0.1;
+                if (state.isLargeLOCA) phtPressure -= 1.0;
+                if (state.isSGRupture) phtPressure -= 0.05;
+                if (state.isFire || state.isInstrumentAirLost) state.isTurbineTripped = true;
+                
+                turbineSpeed = 1800 * powerFactor;
+                if(state.isTurbineTripped) turbineSpeed = Math.max(0, turbineSpeed - 100);
+
+                if(!state.hasOffsitePower) {
+                    if (reactorPower > 5) { powerSetpoint = 5; reactorPower = Math.max(5, reactorPower - 10); }
+                }
+                
+                if (state.isBlackout) {
+                    meltdownElapsedTime++;
+                    updateMeltdownConsequences();
+                }
+
+                fuelChannels.forEach(channel => {
+                    if (!state.isScrammed && reactorPower > 10) channel.daysToRefuel -= 1/24;
+                    if (channel.daysToRefuel <= 0) channel.refuelNeeded = true;
+                });
+                
+                updateHistory(); checkForAlarms(); updateScore(); updateUI();
+            }
+            
+            function updateMeltdownConsequences() {
+                const casualties = Math.floor(Math.pow(meltdownElapsedTime, 2.5) * 150);
+                dom.casualtiesCounter.textContent = casualties.toLocaleString();
+
+                if(meltdownElapsedTime === 1) addLog("Core uncovery begins. Fuel temperatures rising exponentially.", "error");
+                if(meltdownElapsedTime === 2) addLog("President addresses the nation. State of Calamity declared in Luzon.", "warn");
+                if(meltdownElapsedTime === 3) addLog("Mass panic ensues. NLEX and SLEX at a standstill. Gridlock death trap.", "error");
+                if(meltdownElapsedTime === 4) addLog("Containment breach imminent. Radioactive plume release expected.", "error");
+                if(meltdownElapsedTime === 6) addLog("International assistance requested. Neighboring countries closing airspace.", "warn");
+            }
+
+            function updateHistory() {
+                const timeLabel = simTime.toLocaleTimeString('en-US');
+                timeHistory.push(timeLabel);
+                phtTempHistory.push(phtTemp);
+                phtPressureHistory.push(phtPressure);
+                mwHistory.push(TOTAL_CAPACITY_MW * (reactorPower / 100));
+                if(timeHistory.length > HISTORY_LENGTH) {
+                    timeHistory.shift(); phtTempHistory.shift(); phtPressureHistory.shift(); mwHistory.shift();
+                }
+            }
+
+            function checkForAlarms() {
+                let alarmCondition = null;
+                if(state.isBlackout) alarmCondition = 'STATION BLACKOUT - CORE MELTDOWN IMMINENT';
+                else if(state.isLargeLOCA) alarmCondition = 'LARGE LOCA - ECCS ACTIVATED';
+                else if(state.isEarthquake) alarmCondition = 'EARTHQUAKE DETECTED - AUTO SCRAM';
+                else if(state.isTsunami) alarmCondition = 'TSUNAMI WARNING - LOSS OF HEAT SINK';
+                else if(state.isFire) alarmCondition = 'FIRE IN TURBINE HALL';
+                else if(state.isControlSystemFailed && reactorPower > 110) alarmCondition = 'CONTROL SYSTEM FAILURE - UNCONTROLLED POWER RISE';
+                else if(state.isPumpTripped) alarmCondition = 'PHT PUMP 1A TRIPPED - REDUCE POWER';
+                else if (state.isTurbineTripped) alarmCondition = 'TURBINE TRIP - RAPID POWER REDUCTION REQUIRED';
+                else if (!state.hasOffsitePower) alarmCondition = 'LOSS OF OFF-SITE POWER - DIESELS STARTED';
+                else if(phtTemp > 325) alarmCondition = 'HIGH PHT TEMPERATURE';
+                else if(phtPressure < 9.0 && !state.isPumpTripped && !state.isScrammed) alarmCondition = 'LOW PHT PRESSURE';
+                
+                if (alarmCondition && (!activeAlarm || activeAlarm.message !== alarmCondition)) {
+                    triggerAlarm(alarmCondition);
+                } else if (activeAlarm && !alarmCondition) {
+                    clearAlarm();
+                }
+            }
+            
+            function updateScore() {
+                if (activeAlarm && !activeAlarm.acknowledged) operatorScore = Math.max(0, operatorScore - 0.5);
+                else if (reactorPower !== powerSetpoint && !state.isScrammed) operatorScore = Math.max(0, operatorScore - 0.1);
+                else if (operatorScore < 100 && !activeAlarm) operatorScore = Math.min(100, operatorScore + 0.1);
+            }
+
+            function updateUI() {
+                if (state.isScrammed) { dom.reactorStatusText.textContent = 'SHUTDOWN'; dom.reactorStatusText.className = 'font-semibold text-red-500'; }
+                else if (reactorPower < 98) { dom.reactorStatusText.textContent = 'RAMPING'; dom.reactorStatusText.className = 'font-semibold text-yellow-400'; }
+                else { dom.reactorStatusText.textContent = 'NOMINAL'; dom.reactorStatusText.className = 'font-semibold text-green-400'; }
+                
+                const currentMW = state.hasOffsitePower ? TOTAL_CAPACITY_MW * (reactorPower / 100) : 0;
+                dom.mwOutput.textContent = Math.round(currentMW);
+                dom.phtTempText.textContent = `${phtTemp.toFixed(1)}°C`;
+                dom.phtPressureText.textContent = `${phtPressure.toFixed(1)}MPa`;
+                dom.operatorScoreEl.textContent = Math.round(operatorScore);
+                dom.turbineSpeedText.textContent = `${Math.round(turbineSpeed)}rpm`;
+                dom.gridOutputText.textContent = `${Math.round(currentMW)}MW`;
+
+                document.getElementById('svg-pump').querySelector('circle').setAttribute('fill', state.isPumpTripped ? '#ef4444' : '#f59e0b');
+                document.getElementById('svg-sg').querySelector('rect').setAttribute('fill', state.isSGRupture ? '#ef4444' : '#60a5fa');
+                document.getElementById('svg-condenser').querySelector('rect').setAttribute('fill', state.isTsunami ? '#ef4444' : '#06b6d4');
+                document.getElementById('svg-turbine').querySelector('rect').setAttribute('fill', state.isTurbineTripped ? '#ef4444' : '#a78bfa');
+                document.getElementById('svg-generator').querySelector('rect').setAttribute('fill', !state.hasOffsitePower ? '#ef4444' : '#facc15');
+
+                const channels = dom.reactorCoreGrid.children;
+                for (let i = 0; i < channels.length; i++) {
+                    const channelData = fuelChannels[i];
+                    const powerFactor = reactorPower / 100;
+                    let bgColor = 'bg-gray-600';
+                    if (powerFactor > 0.01) {
+                        const temp = channelData.temp * powerFactor + (state.isPumpTripped ? 5 : 0);
+                        if (temp > 325) bgColor = 'bg-red-500';
+                        else if (temp > 315) bgColor = 'bg-orange-500';
+                        else bgColor = 'bg-emerald-500';
+                    }
+                    if (channelData.refuelNeeded) bgColor = 'bg-blue-500 animate-pulse';
+                    channels[i].className = `fuel-channel w-full h-4 rounded ${bgColor}`;
+                }
+                
+                dom.meltdownConsequences.classList.toggle('hidden', !state.isBlackout);
+            }
+            
+            function updateClock() { dom.currentTimeEl.textContent = simTime.toLocaleString('en-US'); }
+
+            function addLog(message, type = 'info') {
+                const now = simTime.toLocaleTimeString();
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                let colorClass = 'text-gray-400';
+                if (type === 'warn') colorClass = 'text-yellow-400';
+                else if (type === 'error') colorClass = 'text-red-400';
+                else if (type === 'success') colorClass = 'text-green-400';
+                entry.innerHTML = `<span class="text-gray-500">${now}</span>: <span class="${colorClass}">${message}</span>`;
+                dom.logContainer.appendChild(entry);
+                dom.logContainer.scrollTop = dom.logContainer.scrollHeight;
+            }
+
+            function triggerAlarm(message) {
+                activeAlarm = { message, acknowledged: false };
+                dom.alarmText.textContent = message;
+                dom.alarmBanner.classList.remove('hidden');
+                dom.alarmBanner.classList.add('flashing-alarm');
+                addLog(`ALARM: ${message}`, 'error');
+            }
+            function acknowledgeAlarm() {
+                if (!activeAlarm) return;
+                activeAlarm.acknowledged = true;
+                dom.alarmBanner.classList.remove('flashing-alarm');
+                addLog('Alarm acknowledged by operator.', 'warn');
+            }
+            function clearAlarm() {
+                activeAlarm = null;
+                dom.alarmBanner.classList.add('hidden');
+                addLog('Alarm condition cleared.', 'success');
+            }
+            
+            function showModal(title, content = '', footerContent = '') {
+                dom.modalTitle.innerHTML = title;
+                dom.modalBody.innerHTML = content;
+                dom.modalFooter.innerHTML = footerContent;
+                dom.modal.classList.remove('hidden');
+            }
+            function hideModal() {
+                 if (trendChart) { trendChart.destroy(); trendChart = null; }
+                 dom.modal.classList.add('hidden');
+            }
+
+            function showChannelInfo(channelId) {
+                const channel = fuelChannels[channelId];
+                if (!channel) return;
+
+                const powerFactor = reactorPower / 100;
+                const currentTemp = channel.temp * powerFactor + (state.isPumpTripped ? 5 : 0);
+                let fuelStatus, statusColor;
+                if (channel.daysToRefuel <= 0) { fuelStatus = "Depleted / Refuel Required"; statusColor = "text-red-400"; } 
+                else if (channel.daysToRefuel <= 30) { fuelStatus = "High Burnup"; statusColor = "text-yellow-400"; } 
+                else { fuelStatus = "Nominal Burnup"; statusColor = "text-green-400"; }
+
+                const title = `Fuel Channel #${channel.id + 1} Status`;
+                const body = `<ul class="space-y-2"><li><strong>Temperature:</strong> <span class="font-mono">${currentTemp.toFixed(1)}°C</span></li><li><strong>Relative Power:</strong> <span class="font-mono">${(channel.power * powerFactor).toFixed(2)}</span></li><li><strong>Fuel Status:</strong> <span class="${statusColor}">${fuelStatus}</span></li><li><strong>Time to Refuel:</strong> <span class="font-mono">${Math.max(0, Math.round(channel.daysToRefuel))} days</span></li></ul>`;
+                let footer = channel.refuelNeeded ? `<button id="refuel-btn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-lg">Begin On-Power Refueling</button>` : `<button id="modal-ok-btn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-lg">OK</button>`;
+
+                showModal(title, body, footer);
+
+                if (channel.refuelNeeded) {
+                    document.getElementById('refuel-btn').addEventListener('click', () => {
+                        channel.refuelNeeded = false; channel.daysToRefuel = 300;
+                        addLog(`On-power refueling completed for channel #${channel.id + 1}.`, 'success');
+                        hideModal(); updateUI();
+                    });
+                } else { document.getElementById('modal-ok-btn').addEventListener('click', hideModal); }
+            }
+
+            function showTrendGraph(dataType) {
+                let title, data, color, label;
+                switch (dataType) {
+                    case 'temp': title = 'PHT Temperature Trend'; data = phtTempHistory; color = '#f59e0b'; label = 'Temp (°C)'; break;
+                    case 'pressure': title = 'PHT Pressure Trend'; data = phtPressureHistory; color = '#0ea5e9'; label = 'Pressure (MPa)'; break;
+                    case 'mw': title = 'Grid Output Trend'; data = mwHistory; color = '#22d3ee'; label = 'Output (MW)'; break;
+                }
+                dom.modalBody.innerHTML = '<canvas id="trendChartCanvas"></canvas>';
+                showModal(title, dom.modalBody.innerHTML, `<button onclick="document.getElementById('modal').classList.add('hidden')" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-lg">Close</button>`);
+                const ctx = document.getElementById('trendChartCanvas').getContext('2d');
+                if (trendChart) trendChart.destroy();
+                trendChart = new Chart(ctx, { type: 'line', data: { labels: timeHistory, datasets: [{ label, data, borderColor: color, tension: 0.1 }] }, options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: false } } } });
+            }
+
+            function resetSimulation() {
+                stateVariables.forEach(v => state[v] = false);
+                state.hasOffsitePower = true;
+                powerSetpoint = 100; reactorPower = 100; operatorScore = 100; meltdownElapsedTime = 0;
+                dom.powerSlider.value = 100; dom.powerValueSpan.textContent = '100'; dom.powerSlider.disabled = false;
+                clearAlarm();
+                addLog('System simulation reset to nominal conditions.', 'success');
+                document.querySelectorAll('.challenge-btn').forEach(btn => btn.disabled = false);
+                updateUI();
+            }
+            
+            function triggerScram() {
+                if (state.isScrammed) return;
+                state.isScrammed = true; powerSetpoint = 0; dom.powerSlider.value = 0; dom.powerSlider.disabled = true; dom.powerValueSpan.textContent = 0;
+                addLog('REACTOR SCRAM INITIATED.', 'error');
+            }
+
+            // --- Event Listeners ---
+            dom.powerSlider.addEventListener('change', (e) => { powerSetpoint = parseInt(e.target.value); addLog(`Power setpoint changed to ${powerSetpoint}%. Ramping...`, 'info'); });
+            dom.powerSlider.addEventListener('input', (e) => { dom.powerValueSpan.textContent = e.target.value; });
+            dom.scramButton.addEventListener('click', triggerScram);
+            dom.resetButton.addEventListener('click', resetSimulation);
+            dom.alarmAckBtn.addEventListener('click', acknowledgeAlarm);
+            dom.locationSelector.addEventListener('change', (e) => {
+                const selectedIndex = e.target.value;
+                if (selectedIndex === 'default' || !map) return;
+                const loc = locations[selectedIndex];
+                dom.locationText.textContent = loc.name;
+                map.setView(loc.coords, 10);
+                addLog(`Simulation location changed to ${loc.name}.`, 'info');
+            });
+
+            dom.challengeButtonsContainer.addEventListener('click', (e) => {
+                const target = e.target;
+                if(target.classList.contains('challenge-btn')) {
+                    const scenario = challengeScenarios.find(s => s.id === target.id);
+                    if (!scenario) return;
+                    target.disabled = true;
+                    const logType = ['red', 'orange'].includes(scenario.color) ? 'error' : 'warn';
+                    addLog(`Challenge: ${scenario.name} initiated.`, logType);
+                    
+                    // Set state based on scenario ID
+                    if (scenario.id === 'fault-pump-trip') state.isPumpTripped = true;
+                    if (scenario.id === 'fault-turbine-trip') state.isTurbineTripped = true;
+                    if (scenario.id === 'fault-power-loss' || scenario.id === 'fault-grid-unstable') state.hasOffsitePower = false;
+                    if (scenario.id === 'fault-small-loca') state.isSmallLOCA = true;
+                    if (scenario.id === 'fault-large-loca') { state.isLargeLOCA = true; triggerScram(); }
+                    if (scenario.id === 'fault-sg-rupture') state.isSGRupture = true;
+                    if (scenario.id === 'fault-instrument-air') state.isInstrumentAirLost = true;
+                    if (scenario.id === 'fault-control-sys') state.isControlSystemFailed = true;
+                    if (scenario.id === 'fault-fire') state.isFire = true;
+                    if (scenario.id === 'fault-earthquake') { state.isEarthquake = true; triggerScram(); }
+                    if (scenario.id === 'fault-tsunami') { state.isTsunami = true; triggerScram(); }
+                    if (scenario.id === 'fault-blackout') { state.isBlackout = true; state.hasOffsitePower = false; triggerScram(); }
+
+                } else if (target.classList.contains('challenge-info-btn')) {
+                    const scenario = challengeScenarios.find(s => s.id === target.dataset.scenarioId);
+                    if(scenario) {
+                        showModal(`Scenario: ${scenario.name}`, `<p>${scenario.description}</p>`, `<button onclick="document.getElementById('modal').classList.add('hidden')" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-lg">Close</button>`);
+                    }
+                }
+            });
+
+            dom.modalCloseBtn.addEventListener('click', hideModal);
+            dom.modal.addEventListener('click', (e) => { if (e.target === dom.modal) hideModal(); });
+            dom.coreInfoBtn.addEventListener('click', () => showModal('About the CANDU Reactor Core', `<p>The CANDU (CANada Deuterium Uranium) reactor core consists of hundreds of horizontal pressure tubes, known as fuel channels. Unlike other reactors, CANDU reactors can be refueled online while at full power, providing a significant advantage in availability.</p><ul class="list-disc list-inside mt-4 space-y-1"><li><strong>Natural Uranium:</strong> Uses non-enriched natural uranium as fuel.</li><li><strong>Heavy Water:</strong> Uses heavy water (D₂O) as both a moderator and a coolant.</li><li><strong>On-Power Refueling:</strong> Fuel bundles can be replaced without shutting down the reactor.</li></ul>`));
+            dom.phtTempGraphBtn.addEventListener('click', () => showTrendGraph('temp'));
+            dom.phtPressureGraphBtn.addEventListener('click', () => showTrendGraph('pressure'));
+
+            initialize();
+        });
+    </script>
+</body>
+</html>
+
